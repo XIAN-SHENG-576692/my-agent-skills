@@ -1,0 +1,3 @@
+interface:
+  display_name: "Git Interaction Audit"
+  short_description: "Maintain concise, traceable Git commit messages from user instructions"
