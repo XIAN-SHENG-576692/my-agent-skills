@@ -1,0 +1,85 @@
+name: Validate and release skills
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate and package each skill
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib
+          import re
+          import zipfile
+
+          root = pathlib.Path('skills')
+          folders = sorted(p for p in root.iterdir() if p.is_dir()) if root.exists() else []
+          if not folders:
+              raise SystemExit('ERROR: No skill directories found in skills/')
+
+          output = pathlib.Path('dist')
+          output.mkdir(exist_ok=True)
+          for folder in folders:
+              entry = folder / 'SKILL.md'
+              if not entry.is_file():
+                  raise SystemExit(f'ERROR: {entry} is missing')
+              content = entry.read_text(encoding='utf-8')
+              match = re.match(r'\A---\s*\n(.*?)\n---\s*(?:\n|\Z)', content, re.S)
+              if not match:
+                  raise SystemExit(f'ERROR: {entry} needs YAML frontmatter')
+              header = match.group(1)
+              name = re.search(r'^name:\s*["\']?([a-z0-9-]+)["\']?\s*$', header, re.M)
+              desc = re.search(r'^description:\s*\S.+$', header, re.M)
+              if not name or name.group(1) != folder.name or not desc:
+                  raise SystemExit(f'ERROR: {entry} needs matching name and nonempty description')
+              archive = output / f'{folder.name}.zip'
+              with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+                  for path in sorted(folder.rglob('*')):
+                      if path.is_file() and not path.is_symlink() and not any(part.startswith('.') for part in path.relative_to(folder).parts):
+                          zf.write(path, path.relative_to(root))
+              print(f'Built {archive}')
+          PY
+
+      - name: Upload CI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: skills-zip
+          path: dist/*.zip
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download built ZIPs
+        uses: actions/download-artifact@v4
+        with:
+          name: skills-zip
+          path: dist
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/*.zip \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
+            --generate-notes
